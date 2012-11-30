@@ -8,6 +8,10 @@
  */
 
 #define FUSE_USE_VERSION 27
+#define DIR_BLOCK_SIZE 64
+#define FILENAME_MAX_LENGTH 43
+#define FILENAME_OFFSET 20
+#define MAX_DIR 16
 
 #include <stdlib.h>
 #include <stddef.h>
@@ -32,6 +36,15 @@
 
 extern struct blkdev *disk;
 
+struct cs5600fs_super superblock;
+
+struct cs5600fs_entry entry;
+
+char *cs5600fs_fat;
+
+struct cs5600fs_dirent root;
+
+
 /* init - this is called once by the FUSE framework at startup.
  * This might be a good place to read in the super-block and set up
  * any global variables you need. You don't need to worry about the
@@ -39,9 +52,92 @@ extern struct blkdev *disk;
  */
 void* hw3_init(struct fuse_conn_info *conn)
 {
-    return NULL;
+  char buffer[SECTOR_SIZE * 2];
+  disk->ops->read(disk, 0, 2, buffer);
+  superblock.magic = *((unsigned int *) buffer);
+  superblock.blk_size = *((unsigned int *) (buffer + 4)); // Always 1024
+  superblock.fs_size = *((unsigned int *) (buffer + 8)); // 1024-byte blocks
+  superblock.fat_len= *((unsigned int *) (buffer + 12)); // 1024-byte blocks
+  superblock.root_dirent = *((unsigned int *) (buffer + 16)); 
+  cs5600fs_fat = (char *) malloc(SECTOR_SIZE * 2 * superblock.fat_len);
+  
+  // Read FAT from superblock
+  int i=0;
+  for(i; i < superblock.fat_len; i++){
+      disk->ops->read(disk, 2 + (i * 2), 2, cs5600fs_fat + (i * SECTOR_SIZE * 2));
+  }
+   return NULL;
 }
 
+/**
+  * Get access to the block of directory for specified file/directory
+  * eg. /root/home/xyz/abc.txt will result in block corresponding to the
+  * /root/home/xyz/ directory
+  * @param: path path of the file / directory
+  * @param: buffer buffer that stores the block directory 
+  * @param: index the block number of the directory in the image
+  * 
+  * Return the index of the directory corresponding to the given file
+  **/ 
+  
+  int getBlockIndexFor(char* path, int* index){
+	char pathFields[50][FILENAME_MAX_LENGTH + 1];
+	int fieldCount = 0;
+	struct cs5600fs_dirent directory[16];
+	int 
+	char* line = NULL;
+	for(fieldCount; fieldCount < 50; fieldCount++){
+	    line = strwrd(path, pathFields[fieldCount], FILENAME_MAX_LENGTH + 1, "/");
+	    if(line == NULL){
+		    break;
+	    }
+	}
+	int i=0, j=0;
+	int dirStart = superblock.root_dirent.start;
+	int indexStart = 0;
+	
+	for(i=0; i<fieldCount; i++){
+	  // Read Dir data into buffer
+	  disk->ops->read(disk, dirStart * 2, 2, (void*)directory);
+	  
+	  for(j; j<=MAX_DIR; j++){
+	    // If j=16 Directory/filename not found
+	    if(j == MAX_DIR){
+	      return -ENOENT;
+	    }
+	    // If directory or filename is found on the disk
+	    if(strcmp(pathFields[j], directory[j].name) == 0){
+	      // If directory then stop searching for next name
+		if(directory[j].isDir){
+		  indexStart = dirStart;
+		  dirStart = directory[j].start;
+		  break;
+		} else {
+		  return -ENOTDIR;
+		}
+	    }
+	    
+	  }
+	}
+	*index = indexStart;
+	return j;
+  }
+  
+/* find the next word starting at 's', delimited by characters
+ * in the string 'delim', and store up to 'len' bytes into *buf
+ * returns pointer to immediately after the word, or NULL if done.
+ */
+char *strwrd(char *s, char *buf, size_t len, char *delim)
+{
+    s += strspn(s, delim);
+    int n = strcspn(s, delim);  /* count the span (spn) of bytes in */
+    if (len-1 < n)              /* the complement (c) of *delim */
+        n = len-1;
+    memcpy(buf, s, n);
+    buf[n] = 0;
+    s += n;
+    return (*s == 0) ? NULL : s;
+}
 /* Note on path translation errors:
  * In addition to the method-specific errors listed below, almost
  * every method can return one of the following errors if it fails to
@@ -63,7 +159,54 @@ void* hw3_init(struct fuse_conn_info *conn)
  */
 static int hw3_getattr(const char *path, struct stat *sb)
 {
-    return -EOPNOTSUPP;
+    char buffer[SECTOR_SIZE * 2];
+    int index;
+    
+    sb->st_dev = 0;
+    sb->st_ino = 0;
+    sb->st_rdev = 0;
+    
+    if(strcmp(path, "/") == 0){
+      disk->ops->read(disk, 0, 2, buffer);
+      sb->st_mode = *(int *) (buffer + 22) | S_IFDIR;
+      sb->st_nlink = 0;
+      sb->st_uid = *(int *) (buffer + 18);
+      sb->st_gid = *(int *) (buffer + 20);
+      sb->st_atime = *((int *)(buffer + 24));
+      sb->st_mtime = *((int *)(buffer + 24));
+      sb->st_ctime = *((int *)(buffer + 24));
+      //sb->st_blksize = BLOCK_SIZE;
+      sb->st_blksize = SECTOR_SIZE * 2;
+      sb->st_size = 0;
+      sb->st_blocks = 0;
+      
+      return 0;
+    }
+    
+    int returnVal = getBlockIndexFor((char *)path, buffer, &index);
+    if(returnVal < 0){
+      return returnVal;
+    }
+    int returnValx64 = returnVal * 64;
+    int isDir = (*((int *)(buffer + 0 + returnValx64))) >> 1 & 1;
+    sb->st_mode = (*((int *)(buffer + 6 + returnValx64))) | (isDir ? S_IFDIR : S_IFREG);
+    sb->st_nlink = 1;
+    sb->st_uid = *((int *)(buffer + 2 + returnValx64));
+    sb->st_gid = *((int *)(buffer + 4 + returnValx64));
+    sb->st_atime = *((int *)(buffer + 8 + returnValx64));
+    sb->st_mtime = *((int *)(buffer + 8 + returnValx64));
+    sb->st_ctime = *((int *)(buffer + 8 + returnValx64));
+    sb->st_blksize = SECTOR_SIZE * 2;
+    
+    if(((*((int *)(buffer + 0 + returnValx64))) >> 1 & 1) != 1)
+      sb->st_size =  *((int *)(buffer + 16 + returnValx64));
+    else
+      sb->st_size = 0;
+    
+    sb->st_blocks =  (sb->st_size + SECTOR_SIZE * 2 -  1) / (SECTOR_SIZE * 2);
+    
+    return 0;
+    //return -EOPNOTSUPP;
 }
 
 /* readdir - get directory contents.
@@ -80,6 +223,37 @@ static int hw3_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
     char *name;
     struct stat sb;
+	char buffer[SECTOR_SIZE * 2];
+	int start, isDir, returnVal;
+	
+	if(strcmp(path, "/") == 0){
+		start = superblock.root_dirent.start;
+	} else {
+		int index;
+		returnVal = getBlockIndexFor((char *)path, buffer, &index);
+	}
+	if(returnVal < 0){
+	  return returnVal;
+	}
+	int returnValx64 = returnVal * 64;
+	start = *((int *)( buffer + 12 + returnValx64));
+	isDir = (*((int *)(buffer + 0 + returnValx64))) >> 1 & 1;
+	
+	if(isDir != 1){
+	  return -ENOTDIR;
+	}
+	
+	disk->ops->read(disk, start * 2, 2, buffer);
+	
+	memset(&sb, 0, sizeof(sb));
+	int i=0, isValid = 0;
+	
+	for(i; i<16; i++){
+	  isValid = (* ((int *)(buffer + 6 + (i * 64)))) & 1;
+	  if(isValid == 0){
+	    continue;
+	  }
+	}
 
     return -EOPNOTSUPP;
 
@@ -222,6 +396,15 @@ static int hw3_statfs(const char *path, struct statvfs *st)
      * it's OK to calculate this dynamically on the rare occasions
      * when this function is called.
      */
+	 st->f_bsize = superblock.block_size;
+	 int fat_size = superblock.fat_size;
+	 st->f_blocks = superblock.filesys_size - fat_size - 1
+	 int i = 0, count = 0;
+	 int entry;
+	
+	for(i; i < fat_size ; i++){
+		entry = *((int *) (fat);
+	}
     return -EOPNOTSUPP;
 }
 
