@@ -53,12 +53,13 @@ struct cs5600fs_dirent root;
 void* hw3_init(struct fuse_conn_info *conn)
 {
   char buffer[SECTOR_SIZE * 2];
-  disk->ops->read(disk, 0, 2, buffer);
-  superblock.magic = *((unsigned int *) buffer);
+  disk->ops->read(disk, 0, 2, superblock);
+  /*superblock.magic = *((unsigned int *) buffer);
   superblock.blk_size = *((unsigned int *) (buffer + 4)); // Always 1024
   superblock.fs_size = *((unsigned int *) (buffer + 8)); // 1024-byte blocks
   superblock.fat_len= *((unsigned int *) (buffer + 12)); // 1024-byte blocks
   superblock.root_dirent = *((unsigned int *) (buffer + 16)); 
+  */
   cs5600fs_fat = (char *) malloc(SECTOR_SIZE * 2 * superblock.fat_len);
   
   // Read FAT from superblock
