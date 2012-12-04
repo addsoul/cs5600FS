@@ -39,14 +39,15 @@ extern struct blkdev *disk;
 
 struct cs5600fs_super superblock;
 
-struct cs5600fs_entry entry;
+struct cs5600fs_entry fat;
 
-char *cs5600fs_fat;
+char *cs5600fs_fat = NULL;
 
-struct cs5600fs_dirent root;
+struct cs5600fs_dirent dirent;
 
 char* strwrd(char*, char*, size_t, char*);
 int getBlockIndexFor(char*, char*, int*);
+void copyDirToDirent(struct cs5600fs_dirent);
 
 /* init - this is called once by the FUSE framework at startup.
  * This might be a good place to read in the super-block and set up
@@ -61,22 +62,14 @@ void* hw3_init(struct fuse_conn_info *conn)
   superblock.blk_size = *((unsigned int *) (buffer + 4)); // Always 1024
   superblock.fs_size = *((unsigned int *) (buffer + 8)); // 1024-byte blocks
   superblock.fat_len= *((unsigned int *) (buffer + 12)); // 1024-byte blocks
+  superblock.root_dirent = *((struct cs5600fs_dirent *) (buffer + 16));
   
-  // Construct root_dirent
-  root.uid = *((short *) (buffer + 18));
-  root.gid = *((short *) (buffer + 20));
-  root.mode = *((short *) (buffer + 22)) | S_IFDIR;
-  root.mtime = *((unsigned int *) (buffer + 24));
-  root.start = *((unsigned int *) (buffer + 28));
-  root.length = 0;
-  
-  superblock.root_dirent = root;
-  
+  //dirent = (struct cs5600_fs) malloc(sizeof(struct cs5600_fs));
   cs5600fs_fat = (char *) malloc(SECTOR_SIZE * 2 * superblock.fat_len);
   
   // Read FAT from superblock
   int i=0;
-  for(i; i < superblock.fat_len; i++){
+  for(i=0; i < superblock.fat_len; i++){
       disk->ops->read(disk, 2 + (i * 2), 2, cs5600fs_fat + (i * SECTOR_SIZE * 2));
   }
    return NULL;
@@ -95,44 +88,59 @@ void* hw3_init(struct fuse_conn_info *conn)
   
   int getBlockIndexFor(char* path, char* buffer, int* index){
 	char pathFields[50][FILENAME_MAX_LENGTH + 1];
-	int fieldCount = 0;
+	int fieldCount;
 	struct cs5600fs_dirent directory[16];
-	char* line = NULL;
-	for(fieldCount; fieldCount < 50; fieldCount++){
-	    line = strwrd(path, pathFields[fieldCount], FILENAME_MAX_LENGTH + 1, "/");
+	char* line = (char *)path;
+	for(fieldCount=0; fieldCount < 50; fieldCount++){
+	    line = strwrd(line, pathFields[fieldCount], FILENAME_MAX_LENGTH + 1, "/");
 	    if(line == NULL){
 		    break;
 	    }
 	}
-	int i=0, j=0;
+	int i, j;
 	int dirStart = superblock.root_dirent.start;
 	int indexStart = 0;
 	
-	for(i=0; i<fieldCount; i++){
+	for(i=0; i<=fieldCount+1; i++){
 	  // Read Dir data into buffer jq
 	  disk->ops->read(disk, dirStart * 2, 2, (void*)directory);
 	  
-	  for(j; j<=MAX_DIR; j++){
-	    // If j=16 Directory/filename not found
-	    if(j == MAX_DIR){
-	      return -ENOENT;
-	    }
+	  for(j=0; j<MAX_DIR; j++){
 	    // If directory or filename is found on the disk
+	    printf("Curr: %s\n", pathFields[j]);
+	    printf("Dir: %s\n", directory[j].name);
+	    printf("CMP: %d\n", strcmp(pathFields[j], directory[j].name));
 	    if(strcmp(pathFields[j], directory[j].name) == 0){
 	      // If directory then stop searching for next name
-		if(directory[j].isDir){
-		  indexStart = dirStart;
-		  dirStart = directory[j].start;
-		  break;
-		} else {
+		if(directory[j].isDir != 1){
 		  return -ENOTDIR;
 		}
+		indexStart = dirStart;
+		dirStart = directory[j].start;
+		//memcpy(dirent, &directory[j], sizeof(dirent));
+		copyDirToDirent(directory[j]);
+		break;
 	    }
-	    
+	  }
+	  if(j == MAX_DIR){
+	      return -ENOENT;
 	  }
 	}
 	*index = indexStart;
 	return j;
+  }
+  
+  void copyDirToDirent(struct cs5600fs_dirent dir){
+    dirent.valid = dir.valid;
+    dirent.isDir = dir.isDir;
+    dirent.pad = dir.pad;
+    dirent.uid = dir.uid;
+    dirent.gid = dir.gid;
+    dirent.mode = dir.mode;
+    dirent.mtime = dir.mtime;
+    dirent.start = dir.start;
+    dirent.length = dir.length;
+    //dirent.name = dir.name;
   }
   
 /* find the next word starting at 's', delimited by characters
@@ -171,30 +179,49 @@ char *strwrd(char *s, char *buf, size_t len, char *delim)
  */
 static int hw3_getattr(const char *path, struct stat *sb)
 {
-    char buffer[SECTOR_SIZE * 2];
+    char buffer[SECTOR_SIZE * 2], buffer1[SECTOR_SIZE * 2];
     int index;
          
     sb->st_dev = 0;
     sb->st_ino = 0;
     sb->st_rdev = 0;
     
-    printf("Block Details: \n");
-    printf("Path: %s\n", path);
-    printf("magic: %d \t", superblock.magic);
-    printf("blk_size: %d \t", superblock.blk_size);
-    printf("fs_size: %d \t", superblock.fs_size);
-    printf("magic: %d \t", superblock.fat_len);
-  
-    if(strcmp(path, "/") == 0){
-      sb->st_mode =  superblock.root_dirent.mode;
-      sb->st_size = superblock.root_dirent.length;
-      sb->st_blocks = CEILING(sb->st_size/superblock.blk_size);
-    } else {
-      printf("Blk No: %d\n", getBlockIndexFor(path, buffer, &index));
-    }
-    printf("");
+    disk->ops->read(disk, superblock.root_dirent.start*2, 2, buffer);
     
-    return 0;
+    if(strcmp(path, "/") == 0){
+      sb->st_uid = superblock.root_dirent.uid;//*((short *) (buffer + 18));
+      sb->st_gid = superblock.root_dirent.gid;//*((short *) (buffer + 20));
+      //printf("Mode: %d",superblock.root_dirent.mode|S_IFDIR);
+      sb->st_mode = superblock.root_dirent.mode | S_IFDIR;//(superblock.root_dirent.isDir ? S_IFDIR : S_IFREG);//*((short *) (buffer + 22)) | S_IFDIR;
+      sb->st_nlink = 1; 
+      sb->st_size = superblock.root_dirent.length;
+      sb->st_atime = superblock.root_dirent.mtime;//*((short *) (buffer + 24));
+      sb->st_mtime = superblock.root_dirent.mtime;//*((short *) (buffer + 24));
+      sb->st_ctime = superblock.root_dirent.mtime;//*((short *) (buffer + 24));
+      sb->st_blocks = CEILING(sb->st_size/superblock.blk_size);
+      return 0;
+    } 
+//       printf("SB Start: %d", superblock.root_dirent.start);
+      int blockPosition = getBlockIndexFor((char *)path, buffer, &index);
+      if(blockPosition < 0) return blockPosition;
+      printf("Found: %s at Blk# %d\n", path, blockPosition);
+      //disk->ops->read(disk, blockPosition * 2, 2, buffer1);
+      //struct cs5600fs_dirent dir = *((struct cs5600fs_dirent*) buffer1);
+      //int isDir = *(int*) (buffer + blockPosition * DIR_BLOCK_SIZE + 2);
+      sb->st_uid = dirent.uid;
+      sb->st_gid = dirent.gid;
+      sb->st_mode = dirent.mode | (dirent.isDir ? S_IFDIR : S_IFREG);
+      sb->st_nlink = 1;
+      sb->st_size = dirent.length;
+      sb->st_atime = dirent.mtime;
+      sb->st_mtime = dirent.mtime;
+      sb->st_ctime = dirent.mtime;
+      sb->st_blocks = CEILING(sb->st_size/superblock.blk_size);
+      sb->st_blksize = SECTOR_SIZE * 2;
+      return 0;
+      
+    //}
+    
     //return -EOPNOTSUPP;
 }
 
@@ -210,7 +237,47 @@ static int hw3_getattr(const char *path, struct stat *sb)
 static int hw3_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fi)
 {
-    return -EOPNOTSUPP;
+    char *name = NULL;
+    struct stat sb ;
+    char buffer[SECTOR_SIZE * 2];
+    int start = 0, isDir = 0, blockPosition = 0, index = 0;
+    
+    if(strcmp(path, "/") == 0){
+      start = superblock.root_dirent.start;
+    } else {
+      blockPosition = getBlockIndexFor((char*)path, buffer, &index);
+      
+      if (blockPosition < 0) return blockPosition;
+      printf("Blk# %d", blockPosition);
+      /*disk->ops->read(disk, blockPosition * 2, 2, buffer);
+      dirent = *(struct cs5600fs_dirent *) buffer;
+      */
+      start = dirent.start;
+      if (dirent.isDir != 1){
+	return -ENOTDIR;
+      }
+    }
+    
+    struct cs5600fs_dirent directory[MAX_DIR];
+    disk->ops->read(disk, start * 2, 2, (void *)directory);
+    memset(&sb, 0, sizeof(sb));
+    int i =0;
+    for(i=0; i<MAX_DIR; i++){
+	if(directory[i].valid !=1) break;
+	name = directory[i].name;
+	sb.st_uid = directory[i].uid;
+	sb.st_gid = directory[i].gid;
+	sb.st_mode = directory[i].mode | (directory[i].isDir ? S_IFDIR : S_IFREG);
+	sb.st_size = directory[i].length;
+	sb.st_atime = directory[i].mtime;
+	sb.st_mtime = directory[i].mtime;
+	sb.st_ctime = directory[i].mtime;
+	sb.st_nlink = 1;
+	sb.st_size = directory[i].isDir ? 0 : directory[i].length;
+	filler(buf, name, &sb, 0);
+    }
+    
+    return 0;
 }
 
 /* create - create a new file with permissions (mode & 01777)
@@ -343,10 +410,15 @@ static int hw3_statfs(const char *path, struct statvfs *st)
 	 int i = 0, count = 0;
 	 int entry;
 	
-	for(i; i < fat_size ; i++){
+	for(i=0; i < fat_size ; i++){
 		entry = *((int *) (cs5600fs_fat));
+		printf("Entry: %d", entry);
+		printf("Entry: %d", entry & 1);
 	}
-    return -EOPNOTSUPP;
+	st->f_bfree = 0;
+	st->f_bavail = 0;
+	st->f_namemax = 43;
+    return 0;
 }
 
 /* operations vector. Please don't rename it, as the skeleton code in
