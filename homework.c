@@ -525,7 +525,7 @@ static int hw3_chmod(const char *path, mode_t mode) {
         blkPos = getBlockIndexFor((char *) path, block, &index);
 
         if (blkPos < 0) return blkPos;
-	directory[index].mode = mode;
+	directory[blkPos].mode = mode;
         //*((short *) (block + 6 + blkPos * 64)) = mode;
         disk->ops->write(disk, index * 2, 2, (void*)directory);
     }
