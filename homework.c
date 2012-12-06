@@ -323,17 +323,18 @@ int hw3_create_helper(char *path, mode_t mode, struct fuse_file_info* fi, char c
     switch(c_mode){
       case 'c':
 	directory[i].valid = 1; 
+	directory[i].isDir = 0;
 	break;
       case 'm': 
 	directory[i].valid = 1;
-	break;
+	directory[i].isDir = 1;
+    	break;
     }
-    directory[i].isDir = 1;
     directory[i].mode = mode & 01777;
     directory[i].start = free_index;
     directory[i].length = 0;
-    directory[i].uid = 0;
-    directory[i].gid = 0;
+    directory[i].uid = getuid();
+    directory[i].gid = getgid();
     directory[i].mtime = time(NULL);
     strcpy(directory[i].name, fname);
     
@@ -391,9 +392,7 @@ static int hw3_unlink(const char *path) {
 
     // dirent.isValid = 0;
     // Make the entry invalid
-    (*((short *) (block + blkPos * 64))) = 0;
-    disk->ops->write(disk, index * 2, 2, block);
-
+    directory[blkPos].valid = 0;
     int next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
     int eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
     (*(int *) (cs5600fs_fat + start * 4)) = 0;
@@ -404,6 +403,7 @@ static int hw3_unlink(const char *path) {
         (*(int *) (cs5600fs_fat + start * 4)) = 0;
     }
     writeFAT();
+    disk->ops->write(disk, index * 2, 2, (void*)directory);
 
     return 0;
 }
@@ -435,11 +435,7 @@ static int hw3_rmdir(const char *path) {
     }
     if (i < MAX_DIR) return -ENOTEMPTY;
 
-    //dirent.valid = 0;
     memset(&directory[rIndex], 0, sizeof(directory[rIndex]));
-    //directory[i].valid = 0;
-    //directory[i].isDir = 0;
-    //(*((short *) (buffer + 0 + blkPos * 64))) = 0;
     disk->ops->write(disk, index * 2, 2, (void*)directory);
     (*(int *) (cs5600fs_fat + start * 4)) = 0;
     writeFAT();
@@ -543,7 +539,7 @@ int hw3_utime(const char *path, struct utimbuf *ut) {
         blkPos = getBlockIndexFor((char *) path, block, &index);
         if (blkPos < 0) return blkPos;
 
-	directory[index].mtime = ut->modtime;
+	directory[blkPos].mtime = ut->modtime;
 //         *((int *) (block + 8 + blkPos * 64)) = ut->modtime;
         disk->ops->write(disk, index * 2, 2, (void*)directory);
     }
@@ -573,7 +569,7 @@ static int hw3_truncate(const char *path, off_t len) {
         if (dirent.isDir) return -EISDIR;
         // dirent.valid = 0
         // Set validity as 0 for a dirent
-	directory[index].valid = 0;
+	directory[blkPos].valid = 0;
 //         *((int *) (block + 16 + blkPos * 64)) = 0;
         disk->ops->write(disk, index * 2, 2, (void*)directory);
 
