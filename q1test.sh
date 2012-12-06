@@ -116,4 +116,4 @@ if [ $? != 0 ] ; then
 else
     echo 'Tests passed - output matches exactly'
 fi
-[ "$verbose" ] || rm -f /tmp/output-$$
+[ "$verbose" ] #|| rm -f /tmp/output-$$
