@@ -478,9 +478,9 @@ static int hw3_rename(const char *src_path, const char *dst_path) {
         if (blkPos < 0) return blkPos;
 
         char *slash = strrchr(dst_path, '/');
-
-        strcpy(block + 20 + blkPos * 64, ++slash);
-        disk->ops->write(disk, index * 2, 2, block);
+	
+        strcpy(directory[blkPos].name, ++slash);
+        disk->ops->write(disk, index * 2, 2, (void*)directory);
     }
     return 0;
 }
