@@ -39,9 +39,9 @@ extern struct blkdev *disk;
 
 struct cs5600fs_super superblock;
 
-struct cs5600fs_entry fat;
+struct cs5600fs_entry* cs5600fs_fat;
 
-char *cs5600fs_fat = NULL;
+char *fat = NULL;
 
 struct cs5600fs_dirent dirent;
 struct cs5600fs_dirent directory[16];
@@ -68,25 +68,28 @@ void* hw3_init(struct fuse_conn_info *conn) {
     superblock.fs_size = *((unsigned int *) (block + 8)); // 1024-byte blocks
     superblock.fat_len = *((unsigned int *) (block + 12)); // 1024-byte blocks
     superblock.root_dirent = *((struct cs5600fs_dirent *) (block + 16));
-
+    
     readFAT();
     return NULL;
 }
 
 void readFAT() {
-    cs5600fs_fat = (char *) malloc(SECTOR_SIZE * 2 * superblock.fat_len);
-
+    
+    fat = (char *) malloc(SECTOR_SIZE * 2 * superblock.fat_len);
+    
     // Read FAT from superblock
     int i = 0;
     for (i = 0; i < superblock.fat_len; i++) {
-        disk->ops->read(disk, 2 + (i * 2), 2, cs5600fs_fat + (i * SECTOR_SIZE * 2));
+        disk->ops->read(disk, 2 + (i * 2), 2, fat + (i * SECTOR_SIZE * 2));
     }
+    
+    cs5600fs_fat = (struct cs5600fs_entry*) fat;
 }
 
 void writeFAT() {
     int i;
     for (i = 0; i < superblock.fat_len; i++) {
-        disk->ops->write(disk, 2 + i * 2, 2, cs5600fs_fat + i * SECTOR_SIZE * 2);
+        disk->ops->write(disk, 2 + i * 2, 2, fat + i * SECTOR_SIZE * 2);
     }
 }
 
@@ -96,12 +99,12 @@ void writeFAT() {
  * /root/home/xyz/ directory
  * @param: path path of the file / directory
  * @param: block block that stores the block directory
- * @param: index the block number of the directory in the image
+ * @param: blkPos the block number of the directory in the image
  *
- * Return the index of the directory corresponding to the given file
+ * Return the blkPos of the directory corresponding to the given file
  **/
 
-int getBlockIndexFor(char* path, char* block, int* index) {
+int getBlockIndexFor(char* path, char* block, int* blkPos) {
     char pathFields[50][FILENAME_MAX_LENGTH + 1];
     int fieldCount;
     //struct cs5600fs_dirent directory[16];
@@ -130,32 +133,16 @@ int getBlockIndexFor(char* path, char* block, int* index) {
                 indexStart = dirStart;
                 dirStart = directory[j].start;
                 memcpy(&dirent, &directory[j], sizeof (dirent));
-
-                //copyDirToDirent(directory[j]);
-                break;
+		break;
             }
         }
         if (j == MAX_DIR) {
             return -ENOENT;
         }
     }
-    *index = indexStart;
+    *blkPos = indexStart;
     return j;
 }
-
-/*void copyDirToDirent(struct cs5600fs_dirent dir){
-  dirent.valid = dir.valid;
-  dirent.isDir = dir.isDir;
-  dirent.pad = dir.pad;
-  dirent.uid = dir.uid;
-  dirent.gid = dir.gid;
-  dirent.mode = dir.mode;
-  dirent.mtime = dir.mtime;
-  dirent.start = dir.start;
-  dirent.length = dir.length;
-  //dirent.name = dir.name;
-}
- */
 
 /* find the next word starting at 's', delimited by characters
  * in the string 'delim', and store up to 'len' bytes into *buf
@@ -192,7 +179,7 @@ char *strwrd(char *s, char *buf, size_t len, char *delim) {
  */
 static int hw3_getattr(const char *path, struct stat *sb) {
     char block[SECTOR_SIZE * 2];//, block1[SECTOR_SIZE * 2];
-    int index;
+    int blkPos;
 
     sb->st_dev = 0;
     sb->st_ino = 0;
@@ -212,8 +199,8 @@ static int hw3_getattr(const char *path, struct stat *sb) {
 	sb->st_blksize = SECTOR_SIZE *2;
         return 0;
     }
-    int blkPos = getBlockIndexFor((char *) path, block, &index);
-    if (blkPos < 0) return blkPos;
+    int posInDir = getBlockIndexFor((char *) path, block, &blkPos);
+    if (posInDir < 0) return posInDir;
     sb->st_uid = dirent.uid;
     sb->st_gid = dirent.gid;
     sb->st_mode = dirent.mode | (dirent.isDir ? S_IFDIR : S_IFREG);
@@ -246,37 +233,37 @@ static int hw3_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     char *name = NULL;
     struct stat sb;
     char block[SECTOR_SIZE * 2];
-    int start = 0, blkPos = 0, index = 0;
+    int start = 0, posInDir = 0, blkPos = 0;
 
     if (strcmp("/", path) == 0) {
         start = superblock.root_dirent.start;
     } else {
-        blkPos = getBlockIndexFor((char*) path, block, &index);
+        posInDir = getBlockIndexFor((char*) path, block, &blkPos);
 
-        if (blkPos < 0) return blkPos;
+        if (posInDir < 0) return posInDir;
         start = dirent.start;
         if (dirent.isDir != 1) {
             return -ENOTDIR;
         }
     }
 
-    //struct cs5600fs_dirent directory[MAX_DIR];
     disk->ops->read(disk, start * 2, 2, (void *) directory);
     memset(&sb, 0, sizeof (sb));
     int i = 0;
     for (i = 0; i < MAX_DIR; i++) {
-        if (directory[i].valid != 1) break;
-        name = directory[i].name;
-        sb.st_uid = directory[i].uid;
-        sb.st_gid = directory[i].gid;
-        sb.st_mode = directory[i].mode | (directory[i].isDir ? S_IFDIR : S_IFREG);
-        sb.st_size = directory[i].length;
-        sb.st_atime = directory[i].mtime;
-        sb.st_mtime = directory[i].mtime;
-        sb.st_ctime = directory[i].mtime;
-        sb.st_nlink = 1;
-        sb.st_size = directory[i].isDir ? 0 : directory[i].length;
-        filler(buf, name, &sb, 0);
+        if (directory[i].valid == 1) {
+	  name = directory[i].name;
+	  sb.st_uid = directory[i].uid;
+	  sb.st_gid = directory[i].gid;
+	  sb.st_mode = directory[i].mode | (directory[i].isDir ? S_IFDIR : S_IFREG);
+	  sb.st_atime = directory[i].mtime;
+	  sb.st_mtime = directory[i].mtime;
+	  sb.st_ctime = directory[i].mtime;
+	  sb.st_nlink = 1;
+	  sb.st_size = directory[i].isDir ? 0 : directory[i].length;
+	  sb.st_blocks = (sb.st_size + SECTOR_SIZE * 2 - 1) / (SECTOR_SIZE * 2);
+	  filler(buf, name, &sb, 0);
+	}
     }
 
     return 0;
@@ -288,14 +275,14 @@ static int hw3_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
  */
 int hw3_create_helper(char *path, mode_t mode, struct fuse_file_info* fi, char c_mode) {
     char block[SECTOR_SIZE * 2];
-    int index, start;
+    int blkPos, start;
 
     if (strcmp("/", path) == 0) {
         return -EEXIST;
     }
 
-    int blkPos = getBlockIndexFor((char *) path, block, &index);
-    if (blkPos >= 0) return blkPos;
+    int posInDir = getBlockIndexFor((char *) path, block, &blkPos);
+    if (posInDir >= 0) return posInDir;
     char *slash = NULL;
     slash = strrchr(path, '/');
     char fname[FILENAME_MAX_LENGTH + 1];
@@ -303,7 +290,7 @@ int hw3_create_helper(char *path, mode_t mode, struct fuse_file_info* fi, char c
     if (slash != path) {
         strcpy(fname, slash + 1);
         *slash = 0;
-        blkPos = getBlockIndexFor((char*) path, block, &index);
+        posInDir = getBlockIndexFor((char*) path, block, &blkPos);
         if (dirent.isDir != 1) return -ENOTDIR;
 	start = dirent.start;
     } else {
@@ -317,21 +304,12 @@ int hw3_create_helper(char *path, mode_t mode, struct fuse_file_info* fi, char c
         if(directory[i].valid == 0) break;
     }
 
-    // Index for 
-    int free_index = getFreeFAT();
-    
-    switch(c_mode){
-      case 'c':
-	directory[i].valid = 1; 
-	directory[i].isDir = 0;
-	break;
-      case 'm': 
-	directory[i].valid = 1;
-	directory[i].isDir = 1;
-    	break;
-    }
+    // blkPos for 
+    int free_blkPos = getFreeFAT();
+    directory[i].valid = 1;
+    directory[i].isDir = c_mode == 'c' ? 0 : 1;  
     directory[i].mode = mode & 01777;
-    directory[i].start = free_index;
+    directory[i].start = free_blkPos;
     directory[i].length = 0;
     directory[i].uid = getuid();
     directory[i].gid = getgid();
@@ -339,16 +317,16 @@ int hw3_create_helper(char *path, mode_t mode, struct fuse_file_info* fi, char c
     strcpy(directory[i].name, fname);
     
     disk->ops->write(disk, start * 2, 2, (void*)directory);
-//     disk->ops->write(disk, free_index * 2, 2, block);
+//     disk->ops->write(disk, free_blkPos * 2, 2, block);
     if(c_mode == 'm'){
-      disk->ops->read(disk, free_index * 2, 2, (void*)directory);
+      disk->ops->read(disk, free_blkPos * 2, 2, (void*)directory);
       for(i=0; i<MAX_DIR; i++){
 	directory[i].valid = 0;
       }
       //memcpy(&block, &directory, sizeof(block));
-      disk->ops->write(disk, free_index * 2, 2, (void*)directory);
+      disk->ops->write(disk, free_blkPos * 2, 2, (void*)directory);
     }
-
+    
     writeFAT();
     *slash = temp;
     return 0;
@@ -379,31 +357,31 @@ static int hw3_mkdir(const char *path, mode_t mode) {
  */
 static int hw3_unlink(const char *path) {
     char block[SECTOR_SIZE * 2];
-    int blkPos, index, start;
+    int posInDir, blkPos, start;
 
     if (strcmp("/", path) == 0) {
         return -EISDIR;
     } else {
-        blkPos = getBlockIndexFor((char *) path, block, &index);
+        posInDir = getBlockIndexFor((char *) path, block, &blkPos);
         start = dirent.start;
-        if (blkPos < 0) return blkPos;
+        if (posInDir < 0) return posInDir;
         if (dirent.isDir == 1) return -EISDIR;
     }
 
-    // dirent.isValid = 0;
     // Make the entry invalid
-    directory[blkPos].valid = 0;
-    int next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-    int eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-    (*(int *) (cs5600fs_fat + start * 4)) = 0;
+//     directory[posInDir].valid = 0;
+    memset(&directory[posInDir], 0, sizeof(directory[5]));
+    int next = cs5600fs_fat[start].next;
+    int eof = cs5600fs_fat[start].eof;
+    cs5600fs_fat[start].inUse = 0;
     while (eof != 1) {
         start = next;
-        next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-        eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-        (*(int *) (cs5600fs_fat + start * 4)) = 0;
+	next = cs5600fs_fat[start].next;
+        eof = cs5600fs_fat[start].eof;
+        cs5600fs_fat[start].inUse = 0;
     }
     writeFAT();
-    disk->ops->write(disk, index * 2, 2, (void*)directory);
+    disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
 
     return 0;
 }
@@ -412,17 +390,16 @@ static int hw3_unlink(const char *path) {
  *  Errors - path resolution, ENOENT, ENOTDIR, ENOTEMPTY
  */
 static int hw3_rmdir(const char *path) {
-    char buffer[SECTOR_SIZE * 2];
     char block[SECTOR_SIZE * 2];
-    int blkPos = 0, index = 0, start = 0, rIndex = 0;
+    int posInDir = 0, blkPos = 0, start = 0, rIndex = 0;
 
     if (strcmp("/", path) == 0) {
         return -ENOENT;
     } else {
-        blkPos = getBlockIndexFor((char *) path, buffer, &index);
-	rIndex = blkPos;
+        posInDir = getBlockIndexFor((char *) path, block, &blkPos);
+	rIndex = posInDir;
         start = dirent.start;
-        if (blkPos < 0) return blkPos;
+        if (posInDir < 0) return posInDir;
         if (dirent.isDir != 1) return -ENOTDIR;
     }
     // Read contents of Dir to be removed
@@ -436,8 +413,8 @@ static int hw3_rmdir(const char *path) {
     if (i < MAX_DIR) return -ENOTEMPTY;
 
     memset(&directory[rIndex], 0, sizeof(directory[rIndex]));
-    disk->ops->write(disk, index * 2, 2, (void*)directory);
-    (*(int *) (cs5600fs_fat + start * 4)) = 0;
+    disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
+    cs5600fs_fat[start].inUse = 0;
     writeFAT();
 
     return 0;
@@ -457,26 +434,26 @@ static int hw3_rmdir(const char *path) {
  */
 static int hw3_rename(const char *src_path, const char *dst_path) {
     char block[SECTOR_SIZE * 2];
-    int blkPos = 0;
+    int posInDir = 0;
 
     if (strcmp("/", src_path) == 0) {
         return -ENOTSUP;
     } else {
-        int index;
-        blkPos = in_same_dir((char *) src_path, (char *) dst_path);
-        if (blkPos != 0)
-            return -EINVAL;
+        int blkPos;
+        posInDir = in_same_dir((char *) src_path, (char *) dst_path);
+        if (posInDir != 0) return -EINVAL;
 
-        blkPos = getBlockIndexFor((char *) dst_path, block, &index);
-        if (blkPos > 0) return -EEXIST;
+        posInDir = getBlockIndexFor((char *) dst_path, block, &blkPos);
+        if (posInDir > 0) return -EEXIST;
 
-        blkPos = getBlockIndexFor((char *) src_path, block, &index);
-        if (blkPos < 0) return blkPos;
+        posInDir = getBlockIndexFor((char *) src_path, block, &blkPos);
+        if (posInDir < 0) return posInDir;
 
         char *slash = strrchr(dst_path, '/');
 	
-        strcpy(directory[blkPos].name, ++slash);
-        disk->ops->write(disk, index * 2, 2, (void*)directory);
+        strcpy(directory[posInDir].name, slash + 1);
+        disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
+	printf("Succeeded\n");
     }
     return 0;
 }
@@ -486,8 +463,7 @@ int in_same_dir(char *src_path, char *dst_path) {
     char *p1 = strrchr(src_path, '/');
     char *p2 = strrchr(dst_path, '/');
 
-    if ((src_path - p1) != (dst_path - p2))
-        return -1;
+    if ((src_path - p1) != (dst_path - p2)) return -1;
 
     char path_src[FILENAME_MAX_LENGTH + 1], path_dst[FILENAME_MAX_LENGTH + 1];
 
@@ -496,12 +472,10 @@ int in_same_dir(char *src_path, char *dst_path) {
     path_src[src_path - p1] = 0;
     path_dst[dst_path - p2] = 0;
 
-    if (src_path - p1 == 0 && dst_path - p2 == 0)
-        return 0;
-    if (strcmp(path_src, path_dst))
-        return 0;
+    if ((src_path - p1 == 0 && dst_path - p2 == 0) || (strcmp(path_src, path_dst)))
+      return 0;
     else
-        return -1;
+      return -1;
 }
 
 /* chmod - change file permissions
@@ -512,36 +486,34 @@ int in_same_dir(char *src_path, char *dst_path) {
  */
 static int hw3_chmod(const char *path, mode_t mode) {
     char block[SECTOR_SIZE * 2];
-    int blkPos = 0;
+    int posInDir = 0;
 
     if (strcmp("/", path) == 0) {
         return -ENOTSUP;
     } else {
-        int index = 0;
-        blkPos = getBlockIndexFor((char *) path, block, &index);
+        int blkPos = 0;
+        posInDir = getBlockIndexFor((char *) path, block, &blkPos);
 
-        if (blkPos < 0) return blkPos;
-	directory[blkPos].mode = mode;
-        //*((short *) (block + 6 + blkPos * 64)) = mode;
-        disk->ops->write(disk, index * 2, 2, (void*)directory);
+        if (posInDir < 0) return posInDir;
+	directory[posInDir].mode = mode;
+        disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
     }
     return 0;
 }
 
 int hw3_utime(const char *path, struct utimbuf *ut) {
     char block[SECTOR_SIZE * 2];
-    int blkPos = 0;
+    int posInDir = 0;
 
     if (strcmp(path, "/") == 0) {
         return -ENOTSUP;
     } else {
-        int index;
-        blkPos = getBlockIndexFor((char *) path, block, &index);
-        if (blkPos < 0) return blkPos;
+        int blkPos;
+        posInDir = getBlockIndexFor((char *) path, block, &blkPos);
+        if (posInDir < 0) return posInDir;
 
-	directory[blkPos].mtime = ut->modtime;
-//         *((int *) (block + 8 + blkPos * 64)) = ut->modtime;
-        disk->ops->write(disk, index * 2, 2, (void*)directory);
+	directory[posInDir].mtime = ut->modtime;
+        disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
     }
     return 0;
 }
@@ -558,31 +530,38 @@ static int hw3_truncate(const char *path, off_t len) {
         return -EINVAL; /* invalid argument */
 
     char block[SECTOR_SIZE * 2];
-    int blkPos = 0, start = 0;
+    int posInDir = 0, start = 0;
 
     if (strcmp("/", path) == 0) {
         return -ENOTSUP;
     } else {
-        int index;
-        blkPos = getBlockIndexFor((char *) path, block, &index);
-        if (blkPos < 0) return blkPos;
+        int blkPos;
+        posInDir = getBlockIndexFor((char *) path, block, &blkPos);
+        if (posInDir < 0) return posInDir;
         if (dirent.isDir) return -EISDIR;
-        // dirent.valid = 0
+	start = dirent.start;
         // Set validity as 0 for a dirent
-	directory[blkPos].valid = 0;
-//         *((int *) (block + 16 + blkPos * 64)) = 0;
-        disk->ops->write(disk, index * 2, 2, (void*)directory);
+	directory[posInDir].valid = 0;
+	directory[posInDir].length = 0;
+        disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
 
-        int next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-        int eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-        (*(int *) (cs5600fs_fat + start * 4)) = 3;
+	int next = cs5600fs_fat[start].next;
+//         int next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
+	int eof = cs5600fs_fat[start].eof;
+//         int eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
+        cs5600fs_fat[start].inUse = 1;
+// 	(*(int *) (cs5600fs_fat + start * 4)) = 3;
         while (eof == 0) {
             start = next;
-            next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-            eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-            (*(int *) (cs5600fs_fat + start * 4)) = 0;
+	    next = cs5600fs_fat[start].next;
+//             next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
+	    eof = cs5600fs_fat[start].eof;
+//             eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
+	    cs5600fs_fat[start].inUse = 0;
+//             (*(int *) (cs5600fs_fat + start * 4)) = 0;
         }
     }
+    writeFAT();
     return 0;
 
 }
@@ -596,15 +575,15 @@ static int hw3_truncate(const char *path, off_t len) {
 static int hw3_read(const char *path, char *buf, size_t len, off_t offset,
         struct fuse_file_info *fi) {
     char block[SECTOR_SIZE * 2];
-    int blkPos, start;
+    int posInDir, start;
 
     if (strcmp("/", path) == 0) {
         return -EISDIR;
     } else {
-        int index = 0;
-        blkPos = getBlockIndexFor((char*) path, block, &index);
+        int blkPos = 0;
+        posInDir = getBlockIndexFor((char*) path, block, &blkPos);
 
-        if (blkPos < 0) return blkPos;
+        if (posInDir < 0) return posInDir;
         start = dirent.start;
         if (dirent.isDir) return -EISDIR;
     }
@@ -614,7 +593,7 @@ static int hw3_read(const char *path, char *buf, size_t len, off_t offset,
     int blk_offset = offset % (SECTOR_SIZE * 2);
     int i;
     for (i = 0; i < blk_num; i++) {
-        start = (*(int*) (cs5600fs_fat + start * 4)) / 4;
+      start = cs5600fs_fat[start].next;
     }
     int lenTemp = len, retVal = 0;
     if (len + offset > dirent.length) {
@@ -634,7 +613,7 @@ static int hw3_read(const char *path, char *buf, size_t len, off_t offset,
             lenTemp = 0;
         }
         blk_offset = 0;
-	start = (*(int*) (cs5600fs_fat + start * 4)) / 4;
+	start = cs5600fs_fat[start].next;
     }
     if (offset + len > dirent.length) return dirent.length - offset;
 
@@ -650,77 +629,76 @@ static int hw3_read(const char *path, char *buf, size_t len, off_t offset,
  */
 static int hw3_write(const char *path, const char *buf, size_t len,
         off_t offset, struct fuse_file_info *fi) {
-    int blkPos = 0, index = 0, isEnd = 0, start = 0;
+    int posInDir, blkPos, isEnd, start, length;
+    
     char block[SECTOR_SIZE * 2];
-    if (strcmp("/", path) == 0) {
-        return -EISDIR;
+    
+    if(strcmp("/", path) == 0){
+      return -EISDIR;
     } else {
-        blkPos = getBlockIndexFor((char*) path, block, &index);
-        if (blkPos < 0) return blkPos;
-        fat = *(struct cs5600fs_entry *) (cs5600fs_fat + start * 4);
-        isEnd = (*(int *) (cs5600fs_fat + start * 4)) >> 1 & 1;
-        if (dirent.isDir == 1) return -EISDIR;
+      posInDir = getBlockIndexFor((char*)path, block, &blkPos);
+      if(posInDir < 0) return posInDir;
+      isEnd = cs5600fs_fat[directory[posInDir].start].eof;
+      start = dirent.start;
+      length = dirent.length;
+      if(dirent.isDir) return -EISDIR;
     }
-
-    if (offset > dirent.length) return -ENOTSUP;
-    if (offset + len > dirent.length) {
-        *((int *) (block + 16 + blkPos * DIR_BLOCK_SIZE)) = offset + len;
-        disk->ops->write(disk, index * 2, 2, block);
+    if(offset > length) return -ENOTSUP;
+    if(offset + len > length){
+      directory[posInDir].length = offset + len;
+      disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
     }
-
-
+    
     int blk_num = offset / (SECTOR_SIZE * 2);
     int blk_offset = offset % (SECTOR_SIZE * 2);
-
-    int i = 0;
-    for (i = 0; i < blk_num && isEnd != 1; i++) {
-        start = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-        isEnd = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
+    
+    int i;
+    for(i=0; i<blk_num && isEnd !=1; i++){
+      start = (*(int *)(fat + start * 4)) / 4; 
+      isEnd = ((*(int *)(fat + start * 4)) / 2) & 1;
     }
-
-    int start1 = 0;
-    if (i < blk_num && isEnd == 1) {
-        start1 = start;
-        start = getFreeFAT();
-        (*(int *) (cs5600fs_fat + start1 * 4)) = (start * 4) + 1;
+    
+    int prev;
+    if(i < blk_num && isEnd == 1)
+    {
+	 prev =  start;
+         start = getFreeFAT();
+         (*(int *)(fat + prev * 4)) = (start * 4) + 1;
     }
-
-    int count = 0;
+    int count;
     disk->ops->read(disk, start * 2, 2, block);
-
-    if (len > SECTOR_SIZE * 2 - blk_offset) {
-        memcpy(block + blk_offset, buf, SECTOR_SIZE * 2 - blk_offset);
-        count = SECTOR_SIZE * 2 - blk_offset;
-        buf += SECTOR_SIZE * 2 - blk_offset;
+    if(len > SECTOR_SIZE * 2 - blk_offset){
+      memcpy(block + blk_offset, buf, SECTOR_SIZE * 2 - blk_offset);
+      count = SECTOR_SIZE * 2 - blk_offset;
+      buf += SECTOR_SIZE * 2 - blk_offset;
     } else {
-        memcpy(block + blk_offset, buf, len);
-        count = len;
-        buf += len;
+      memcpy(block + blk_offset, buf, len);
+      count = len;
+      buf += len;
     }
-
     disk->ops->write(disk, start * 2, 2, block);
-
-    while (len > count) {
-        if (isEnd == 0) {
-            start = (*(int *) (cs5600fs_fat + start * 4)) / 4;
-            isEnd = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-        } else {
-            start1 = start;
-            start = getFreeFAT();
-            (*(int *) (cs5600fs_fat + start1 * 4)) = 1 + (start * 4);
-        }
-        if (len - count > SECTOR_SIZE * 2) {
-            disk->ops->write(disk, start * 2, 2, (char *) buf);
-            buf += SECTOR_SIZE * 2;
-            count += SECTOR_SIZE * 2;
-        } else {
-            disk->ops->read(disk, start * 2, 2, block);
-            memcpy(block, buf, len - count);
-            disk->ops->write(disk, start * 2, 2, block);
-            buf += len - count;
-            count += len - count;
-        }
-
+    
+    while( len > count){
+      if (isEnd == 0){
+	start = (*(int *)(fat + start * 4)) / 4;
+	isEnd = ((*(int *)(fat + start * 4)) / 2) & 1;
+	
+      } else {
+	prev = start;
+	start = getFreeFAT();
+	(*(int *)(fat + prev * 4)) = (start * 4) + 1;
+      }
+      if( len - count > SECTOR_SIZE * 2){
+	disk->ops->write(disk, start * 2, 2, (char*)buf);
+	buf += SECTOR_SIZE * 2;
+	count += SECTOR_SIZE * 2;
+      } else {
+	disk->ops->read(disk, start * 2, 2, block);
+	memcpy(block, buf, len - count);
+	disk->ops->write(disk, start * 2, 2, block);
+	buf += len - count;
+	count += len - count;
+      }
     }
     writeFAT();
     return len;
@@ -729,15 +707,18 @@ static int hw3_write(const char *path, const char *buf, size_t len,
 // Get first available free block in FAT
 
 int getFreeFAT() {
-    int fat_size = superblock.fs_size;
     int i = 0;
-    int entry;
-    for (i = 0; i < fat_size; i++) {
-        entry = *((int *) (cs5600fs_fat + i * 4));
-        if ((entry & 1) == 0) {
-            *((int *) (cs5600fs_fat + i * 4)) = 3;
-            return i;
-        }
+    for (i = 0; i < superblock.fs_size; i++) {
+      if(cs5600fs_fat[i].inUse == 0){ 
+	cs5600fs_fat[i].inUse = 1;
+	cs5600fs_fat[i].eof = 1;
+	return i;
+      }
+//         entry = *((int *) (cs5600fs_fat + i * 4));
+//         if ((entry & 1) == 0) {
+//             *((int *) (cs5600fs_fat + i * 4)) = 3;
+//             return i;
+//         }
     }
     return --i;
 }
@@ -769,7 +750,7 @@ static int hw3_statfs(const char *path, struct statvfs *st) {
     }
     st->f_bfree = count;
     st->f_bavail = count;
-    st->f_namemax = 43;
+    st->f_namemax = FILENAME_MAX_LENGTH;
     return 0;
 }
 
@@ -792,4 +773,3 @@ struct fuse_operations hw3_ops = {
     .write = hw3_write,
     .statfs = hw3_statfs,
 };
-
