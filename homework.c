@@ -546,19 +546,13 @@ static int hw3_truncate(const char *path, off_t len) {
         disk->ops->write(disk, blkPos * 2, 2, (void*)directory);
 
 	int next = cs5600fs_fat[start].next;
-//         int next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
 	int eof = cs5600fs_fat[start].eof;
-//         int eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
-        cs5600fs_fat[start].inUse = 1;
-// 	(*(int *) (cs5600fs_fat + start * 4)) = 3;
+	cs5600fs_fat[start].inUse = 1;
         while (eof == 0) {
             start = next;
 	    next = cs5600fs_fat[start].next;
-//             next = (*(int *) (cs5600fs_fat + start * 4)) / 4;
 	    eof = cs5600fs_fat[start].eof;
-//             eof = ((*(int *) (cs5600fs_fat + start * 4)) / 2) & 1;
 	    cs5600fs_fat[start].inUse = 0;
-//             (*(int *) (cs5600fs_fat + start * 4)) = 0;
         }
     }
     writeFAT();
