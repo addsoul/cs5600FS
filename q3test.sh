@@ -138,6 +138,8 @@ checktest 5
 # read / modify / write
 echo Test 6 - read/modify/write
 yes test 6 data file | fmt | head -40 > $MNT/test-6.dat
+#ls -l $MNT/test.out
+#cksumtest test.out "3915528286 4"
 cksumtest test-6.dat "3581607758 2890"
 yes a | dd bs=64 count=1 conv=notrunc of=$MNT/test-6.dat > /dev/null 2> /dev/null
 cksumtest test-6.dat "2437960129 2890"
@@ -159,6 +161,7 @@ checktest 7
 
 # rename
 echo Test 8 - rename
+sleep 1
 yes this is a test | fmt | head -40 > $MNT/test.out
 mv $MNT/test.out $MNT/file7.txt || fail=1
 cksumtest file7.txt "1971346563 2800"
